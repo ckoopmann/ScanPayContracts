@@ -8,13 +8,11 @@ import {
     IERC20Permit__factory,
 } from "../typechain-types";
 
-async function main() {
-    // target contract address
-    const scanPayAddress = "0xe5759060F3a09ED499b3097014A16D60A4eD6040";
-    const usdcAddress = "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83";
-    const amountToTransfer = ethers.utils.parseUnits("0.25", 6);
-    const receiver = "0x60890A74D244269F2feb888201A879b578082f97";
+const usdcAddress = "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83";
+const scanPayAddress = "0xe5759060F3a09ED499b3097014A16D60A4eD6040";
 
+async function main() {
+    const amountToTransfer = ethers.utils.parseUnits("0.01", 6);
     const [signer] = await ethers.getSigners();
     const result = await getPermitSignature(
         signer,
@@ -24,31 +22,64 @@ async function main() {
         600
     );
 
-    const usdcContract = IERC20Permit__factory.connect(usdcAddress, signer);
+    const permitCalldata = await getPermitCalldata(result,  amountToTransfer);
+
+    const receiver = "0x60890A74D244269F2feb888201A879b578082f97";
+    await gaslessPayment(signer, amountToTransfer, receiver, permitCalldata);
+}
+
+function getTokenAbi() {
+    return [
+        "function nonces(address) view returns (uint256)",
+        "function name() view returns (string)",
+        "function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external",
+        "function transferFrom(address sender, address recipient, uint256 amount) external returns (bool)",
+    ];
+}
+
+async function getPermitCalldata(
+    permitSignatureResult: any,
+    amountToTransfer: BigNumberish,
+) {
+    const provider = getProvider();
+    const usdcContract = IERC20Permit__factory.connect(usdcAddress, provider);
     const { data: permitCalldata } =
         await usdcContract.populateTransaction.permit(
-            signer.address,
+            permitSignatureResult.sender,
             scanPayAddress,
             amountToTransfer,
-            result.deadline ?? ethers.constants.MaxUint256,
-            result.v,
-            result.r,
-            result.s
+            permitSignatureResult.deadline ?? ethers.constants.MaxUint256,
+            permitSignatureResult.v,
+            permitSignatureResult.r,
+            permitSignatureResult.s
         );
     console.log("Permit Calldata", permitCalldata);
+    return permitCalldata;
+}
+
+async function gaslessPayment(
+    signer: Signer,
+    amountToTransfer: BigNumberish,
+    receiver: string,
+    permitCalldata: string
+) {
+    const owner = await signer.getAddress();
 
     const scanPayContract = ScanPay__factory.connect(scanPayAddress, signer);
-    const { data: scanPayCalldata } = await scanPayContract.populateTransaction.settlePayment(
-        usdcAddress,
-        signer.address,
-        receiver,
-        amountToTransfer,
-        permitCalldata ?? "0x"
-    );
+    const { data: scanPayCalldata } =
+        await scanPayContract.populateTransaction.settlePayment(
+            usdcAddress,
+            owner,
+            receiver,
+            amountToTransfer,
+            permitCalldata ?? "0x"
+        );
 
     console.log("ScanPay Calldata", scanPayCalldata);
 
-    const { chainId } = (await signer.provider?.getNetwork()) ?? { chainId: -1 };
+    const { chainId } = (await signer.provider?.getNetwork()) ?? {
+        chainId: -1,
+    };
     console.log("ChainId", chainId);
 
     const relay = new GelatoRelay();
@@ -65,15 +96,26 @@ async function main() {
     // send relayRequest to Gelato Relay API
     const relayResponse = await relay.callWithSyncFee(request);
     console.log("Relay Response", relayResponse);
-}
+    const taskId = relayResponse.taskId;
 
-function getTokenAbi() {
-    return [
-        "function nonces(address) view returns (uint256)",
-        "function name() view returns (string)",
-        "function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external",
-        "function transferFrom(address sender, address recipient, uint256 amount) external returns (bool)",
-    ];
+    const taskFulfilledPromise = new Promise((resolve, reject) => {
+        const maxRetry = 100;
+        let retryNum = 0;
+        const interval = setInterval(async () => {
+            retryNum++;
+            if (retryNum > maxRetry) {
+                clearInterval(interval);
+                reject("Max retry reached");
+            }
+            const taskStatus = await relay.getTaskStatus(taskId);
+            console.log("Task Status", taskStatus);
+            if (taskStatus?.taskState == "ExecSuccess") {
+                clearInterval(interval);
+                resolve(taskStatus);
+            }
+        }, 500);
+    });
+    await taskFulfilledPromise;
 }
 
 function getTokenContract(tokenAddress: string) {
@@ -181,6 +223,12 @@ export async function getPermitSignature(
         sender: owner,
     };
 }
+
+function getProvider() {
+    const rpcUrl = "https://rpc.gnosischain.com/";
+    return new ethers.providers.JsonRpcProvider(rpcUrl);
+}
+
 
 // We recommend this pattern to be able to use async/await everywhere
 // and properly handle errors.
