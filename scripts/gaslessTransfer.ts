@@ -1,12 +1,6 @@
 import { ethers } from "hardhat";
 import { Signer, BigNumberish } from "ethers";
 import { GelatoRelay, CallWithSyncFeeRequest } from "@gelatonetwork/relay-sdk";
-import {
-    ScanPay,
-    ScanPay__factory,
-    IERC20Permit,
-    IERC20Permit__factory,
-} from "../typechain-types";
 
 const usdcAddress = "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83";
 const scanPayAddress = "0xe5759060F3a09ED499b3097014A16D60A4eD6040";
@@ -22,10 +16,9 @@ async function main() {
         600
     );
 
-    const permitCalldata = await getPermitCalldata(result,  amountToTransfer);
-
+    const permitCalldata = await getPermitCalldata(result, amountToTransfer);
     const receiver = "0x60890A74D244269F2feb888201A879b578082f97";
-    await gaslessPayment(signer, amountToTransfer, receiver, permitCalldata);
+    await gaslessPayment(signer.address, amountToTransfer, receiver, permitCalldata);
 }
 
 function getTokenAbi() {
@@ -39,10 +32,14 @@ function getTokenAbi() {
 
 async function getPermitCalldata(
     permitSignatureResult: any,
-    amountToTransfer: BigNumberish,
+    amountToTransfer: BigNumberish
 ) {
     const provider = getProvider();
-    const usdcContract = IERC20Permit__factory.connect(usdcAddress, provider);
+    const usdcContract = new ethers.Contract(
+        usdcAddress,
+        getTokenAbi(),
+        provider
+    );
     const { data: permitCalldata } =
         await usdcContract.populateTransaction.permit(
             permitSignatureResult.sender,
@@ -58,14 +55,17 @@ async function getPermitCalldata(
 }
 
 async function gaslessPayment(
-    signer: Signer,
+    owner: string,
     amountToTransfer: BigNumberish,
     receiver: string,
     permitCalldata: string
 ) {
-    const owner = await signer.getAddress();
-
-    const scanPayContract = ScanPay__factory.connect(scanPayAddress, signer);
+    const provider = getProvider();
+    const scanPayContract = new ethers.Contract(
+        scanPayAddress,
+        ["function settlePayment(address _token, address _owner, address _receiver, uint256 _amount, bytes calldata _permitCalldata) external"],
+        provider
+    );
     const { data: scanPayCalldata } =
         await scanPayContract.populateTransaction.settlePayment(
             usdcAddress,
@@ -77,7 +77,7 @@ async function gaslessPayment(
 
     console.log("ScanPay Calldata", scanPayCalldata);
 
-    const { chainId } = (await signer.provider?.getNetwork()) ?? {
+    const { chainId } = (await provider.getNetwork()) ?? {
         chainId: -1,
     };
     console.log("ChainId", chainId);
@@ -228,7 +228,6 @@ function getProvider() {
     const rpcUrl = "https://rpc.gnosischain.com/";
     return new ethers.providers.JsonRpcProvider(rpcUrl);
 }
-
 
 // We recommend this pattern to be able to use async/await everywhere
 // and properly handle errors.
